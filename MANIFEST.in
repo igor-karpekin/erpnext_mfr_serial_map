@@ -1,0 +1,2 @@
+recursive-include mfr_serial_map/fixtures *.json
+recursive-include mfr_serial_map/public *

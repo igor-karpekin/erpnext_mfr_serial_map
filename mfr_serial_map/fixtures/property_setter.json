@@ -1,0 +1,12 @@
+[
+  {
+    "doctype": "Property Setter",
+    "name": "Serial No-main-search_fields",
+    "doctype_or_field": "DocType",
+    "doc_type": "Serial No",
+    "field_name": null,
+    "property": "search_fields",
+    "property_type": "Data",
+    "value": "item_code,custom_mfr_ser"
+  }
+]

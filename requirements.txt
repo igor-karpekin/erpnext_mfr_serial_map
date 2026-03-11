@@ -1,0 +1,1 @@
+# No extra Python dependencies — frappe and erpnext are installed separately

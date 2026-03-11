@@ -1,0 +1,26 @@
+[
+  {
+    "doctype": "Custom Field",
+    "name": "Serial No-custom_mfr_ser",
+    "dt": "Serial No",
+    "label": "MFR Serial No",
+    "fieldname": "custom_mfr_ser",
+    "fieldtype": "Data",
+    "insert_after": "serial_no",
+    "in_list_view": 1,
+    "in_standard_filter": 1,
+    "search_index": 1,
+    "translatable": 0
+  },
+  {
+    "doctype": "Custom Field",
+    "name": "Item-custom_generate_internal_serial",
+    "dt": "Item",
+    "label": "Generate Internal Serial No",
+    "fieldname": "custom_generate_internal_serial",
+    "fieldtype": "Check",
+    "insert_after": "serial_no_series",
+    "description": "When enabled, the manufacturer serial scanned at receipt is stored in MFR Serial No and the item's Serial No Series generates the internal tracking number.",
+    "translatable": 0
+  }
+]

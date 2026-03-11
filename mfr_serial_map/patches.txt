@@ -1,0 +1,2 @@
+mfr_serial_map.patches.add_unique_index_mfr_ser
+
