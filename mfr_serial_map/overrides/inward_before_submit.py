@@ -126,6 +126,7 @@ def remap_serials_sabb(doc, method):
 				internal_serial,
 				ignore_permissions=True,
 				rebuild_search=False,
+				show_alert=False,
 			)
 		else:
 			# Fallback: serial was never pre-created (amended PI, bulk import, etc.)
