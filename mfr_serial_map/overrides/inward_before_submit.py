@@ -12,18 +12,59 @@
 # which is what every downstream report, reservation and valuation expects.
 
 import frappe
+from frappe.model.naming import make_autoname
 from frappe.model.rename_doc import rename_doc
-from erpnext.stock.doctype.serial_no.serial_no import get_new_serial_number
 
 
 @frappe.whitelist()
 def get_effective_series(item_code):
-	"""Return the series that will be used for internal serial generation.
-	Checks item-level series first, then site default. Returns None if neither defined."""
+	"""Return a description of the series used for internal serial generation."""
+	series = frappe.get_cached_value("Item", item_code, "serial_no_series")
+	if series:
+		return series
+	rules = frappe.get_all(
+		"Document Naming Rule",
+		filters={"document_type": "Serial No", "disabled": 0},
+		fields=["prefix"],
+		order_by="priority desc",
+		limit=1,
+	)
+	if rules:
+		return rules[0].prefix or "(Document Naming Rule)"
+	return None
+
+
+def _get_next_internal_serial(item_code):
+	"""
+	Determine the next internal serial name using, in order:
+	  1. Item.serial_no_series  (explicit per-item series)
+	  2. Document Naming Rule for Serial No  (global rule, e.g. CA-.YY..MM..DD.-.####)
+	Raises a descriptive error if neither is configured.
+	"""
 	series = frappe.get_cached_value("Item", item_code, "serial_no_series")
 	if not series:
-		series = frappe.db.get_default("serial_no_series")
-	return series or None
+		rules = frappe.get_all(
+			"Document Naming Rule",
+			filters={"document_type": "Serial No", "disabled": 0},
+			fields=["prefix"],
+			order_by="priority desc",
+			limit=1,
+		)
+		if rules:
+			series = rules[0].prefix
+
+	if not series:
+		frappe.throw(
+			f"Item {frappe.bold(item_code)} has <b>Generate Internal Serial No</b> enabled "
+			f"but no series is defined. Set <b>Serial Number Series</b> on the item, or "
+			f"create a <b>Document Naming Rule</b> for Serial No in Setup."
+		)
+
+	name = make_autoname(series, "Serial No")
+	# Guard against collisions (same logic as get_new_serial_number)
+	if frappe.db.exists("Serial No", name):
+		return _get_next_internal_serial(item_code)
+	return name
 
 
 def _remap_bundle(bundle_name, item_code):
@@ -32,24 +73,15 @@ def _remap_bundle(bundle_name, item_code):
 	custom_mfr_ser value (i.e. it still carries the scanned manufacturer
 	serial as its name):
 
-	  1. Generate a new internal serial via the item's Serial No Series.
+	  1. Determine the next internal serial via Item series or Document Naming Rule.
 	  2. rename_doc: Serial No <mfr_serial> → <internal_serial>.
 	  3. Write custom_mfr_ser = <mfr_serial> on the renamed record.
-	  4. Update the global-search index row (db.set_value bypasses hooks).
+	  4. Update the global-search index row.
 	  5. Patch entry.serial_no = <internal_serial> and save the bundle.
 
-	Idempotent: re-running the function on an already-remapped bundle is a
-	no-op because step 3 leaves a non-empty custom_mfr_ser, which is the
-	guard checked at the top of the loop.
+	Idempotent: if a Serial No with custom_mfr_ser = mfr_serial already
+	exists for this item the entry is updated to point to it and skipped.
 	"""
-	series = get_effective_series(item_code)
-	if not series:
-		frappe.throw(
-			f"Item {frappe.bold(item_code)} has <b>Generate Internal Serial No</b> enabled "
-			f"but no Serial No Series is defined — neither on the item nor as a site default. "
-			f"Set a series in <b>Serial Number Series</b> on the item, or configure a "
-			f"default via <b>Setup → Naming Series</b>."
-		)
 	bundle = frappe.get_doc("Serial and Batch Bundle", bundle_name)
 	changed = False
 
@@ -58,13 +90,19 @@ def _remap_bundle(bundle_name, item_code):
 		if not mfr_serial:
 			continue
 
-		# Idempotency guard: non-empty custom_mfr_ser means this entry was
-		# already processed (the serial_no field now holds the internal name).
-		if frappe.db.get_value("Serial No", mfr_serial, "custom_mfr_ser"):
+		# Idempotency guard: already remapped in a previous attempt.
+		already = frappe.db.get_value(
+			"Serial No",
+			{"custom_mfr_ser": mfr_serial, "item_code": item_code},
+			"name",
+		)
+		if already:
+			if entry.serial_no != already:
+				entry.serial_no = already
+				changed = True
 			continue
 
-		# Uniqueness guard: same MFR serial must not exist for the same item
-		# under a different internal serial name.
+		# Uniqueness guard: catches concurrent submissions.
 		conflict = frappe.db.get_value(
 			"Serial No",
 			{"custom_mfr_ser": mfr_serial, "item_code": item_code},
@@ -77,20 +115,19 @@ def _remap_bundle(bundle_name, item_code):
 				f"Each manufacturer serial must be unique per item."
 			)
 
-		internal_serial = get_new_serial_number(series)
+		internal_serial = _get_next_internal_serial(item_code)
 
 		if frappe.db.exists("Serial No", mfr_serial):
-			# Standard path: Serial No was created by is_serial_batch_no_exists
-			# at scan time inside the SABB dialog.
+			# Standard path: rename the OEM-named stub to the internal name.
 			rename_doc(
 				"Serial No",
 				mfr_serial,
 				internal_serial,
 				ignore_permissions=True,
-				rebuild_search=False,  # we update the index manually below
+				rebuild_search=False,
 			)
 		else:
-			# Fallback: CSV / bulk-upload path where Serial No may not exist yet.
+			# Fallback: CSV/bulk-upload path — create fresh with internal name.
 			sn = frappe.new_doc("Serial No")
 			sn.serial_no = internal_serial
 			sn.item_code = item_code
