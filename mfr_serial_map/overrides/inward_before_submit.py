@@ -82,6 +82,10 @@ def _remap_bundle(bundle_name, item_code):
 	Idempotent: if a Serial No with custom_mfr_ser = mfr_serial already
 	exists for this item the entry is updated to point to it and skipped.
 	"""
+	frappe.log_error(
+		f"_remap_bundle called: bundle={bundle_name} item={item_code}",
+		"MFR_DEBUG _remap_bundle",
+	)
 	bundle = frappe.get_doc("Serial and Batch Bundle", bundle_name)
 	changed = False
 
@@ -117,7 +121,12 @@ def _remap_bundle(bundle_name, item_code):
 
 		internal_serial = _get_next_internal_serial(item_code)
 
-		if frappe.db.exists("Serial No", mfr_serial):
+		sn_exists = frappe.db.exists("Serial No", mfr_serial)
+		frappe.log_error(
+			f"_remap_bundle: mfr={mfr_serial} internal={internal_serial} sn_exists={sn_exists}",
+			"MFR_DEBUG rename_step",
+		)
+		if sn_exists:
 			# Standard path: rename the OEM-named stub to the internal name.
 			rename_doc(
 				"Serial No",
@@ -132,7 +141,12 @@ def _remap_bundle(bundle_name, item_code):
 			sn.serial_no = internal_serial
 			sn.item_code = item_code
 			sn.flags.ignore_permissions = True
-			sn.insert(ignore_permissions=True)
+			try:
+				sn.insert(ignore_permissions=True)
+				frappe.log_error(f"_remap_bundle: inserted {internal_serial}", "MFR_DEBUG insert_ok")
+			except Exception as e:
+				frappe.log_error(f"_remap_bundle: insert FAILED {e}", "MFR_DEBUG insert_fail")
+				raise
 
 		# Single source of truth for the manufacturer serial.
 		# db.set_value is intentional here — we do NOT want validate/save hooks
@@ -163,13 +177,21 @@ def _remap_bundle(bundle_name, item_code):
 def _process_items(items):
 	"""Walk the items table and remap every applicable SABB."""
 	for item in items:
-		if not item.get("serial_and_batch_bundle"):
+		bundle = item.get("serial_and_batch_bundle")
+		has_sn = frappe.get_cached_value("Item", item.item_code, "has_serial_no")
+		gen_int = frappe.get_cached_value("Item", item.item_code, "custom_generate_internal_serial")
+		frappe.log_error(
+			f"_process_items: item={item.item_code} bundle={bundle} "
+			f"has_serial_no={has_sn} custom_generate_internal_serial={gen_int}",
+			"MFR_DEBUG _process_items",
+		)
+		if not bundle:
 			continue
-		if not frappe.get_cached_value("Item", item.item_code, "has_serial_no"):
+		if not has_sn:
 			continue
-		if not frappe.get_cached_value("Item", item.item_code, "custom_generate_internal_serial"):
+		if not gen_int:
 			continue
-		_remap_bundle(item.serial_and_batch_bundle, item.item_code)
+		_remap_bundle(bundle, item.item_code)
 
 
 # ── event handlers ─────────────────────────────────────────────────────────────
@@ -181,6 +203,10 @@ def remap_serials(doc, method):
 
 def remap_serials_pi(doc, method):
 	"""Purchase Invoice — only when 'Update Stock' is ticked."""
+	frappe.log_error(
+		f"remap_serials_pi fired: doc={doc.name} update_stock={doc.update_stock} items={len(doc.items)}",
+		"MFR_DEBUG remap_serials_pi",
+	)
 	if doc.update_stock:
 		_process_items(doc.items)
 
