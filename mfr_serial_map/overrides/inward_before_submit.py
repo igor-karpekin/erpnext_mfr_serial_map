@@ -1,19 +1,22 @@
 # mfr_serial_map/overrides/inward_before_submit.py
 #
-# Runs in the before_submit window of inward vouchers (Purchase Receipt,
-# Purchase Invoice with Update Stock, Stock Entry for inward purposes).
+# Hooks into Serial and Batch Bundle.before_submit.
 #
-# At that point the Serial and Batch Bundle exists as a draft and its entries
-# hold the manufacturer serial values scanned by the user.  No Stock Ledger
-# Entries have been written yet, so renaming Serial No documents is safe.
+# WHY this event, not Purchase Invoice.before_submit:
+#   For amended PIs (and in general for ERPNext v16), the SABB is created
+#   during Purchase Invoice.on_submit, AFTER our before_submit hook would run.
+#   By the time SABB.before_submit fires (during PI.on_submit), the bundle
+#   entries hold the scanned OEM serials -- and no SLEs have been written yet.
 #
-# After this hook completes the bundle entries carry the internal serials;
-# the upstream on_submit flow writes SLEs against those internal serials,
-# which is what every downstream report, reservation and valuation expects.
+# The hook modifies doc.entries in-place (used by ERPNext to write SLEs) and
+# also updates the DB rows via _patch_entry(), so both the in-flight
+# transaction and any future lookup see the internal serial names.
 
 import frappe
 from frappe.model.naming import make_autoname
 from frappe.model.rename_doc import rename_doc
+
+INWARD_VOUCHERS = {"Purchase Receipt", "Purchase Invoice", "Stock Entry"}
 
 
 @frappe.whitelist()
@@ -67,66 +70,55 @@ def _get_next_internal_serial(item_code):
 	return name
 
 
-def _remap_bundle(bundle_name, item_code):
+def remap_serials_sabb(doc, method):
 	"""
-	For every entry in the SABB whose serial_no does not yet have a
-	custom_mfr_ser value (i.e. it still carries the scanned manufacturer
-	serial as its name):
+	Serial and Batch Bundle -- before_submit.
 
-	  1. Determine the next internal serial via Item series or Document Naming Rule.
-	  2. rename_doc: Serial No <mfr_serial> → <internal_serial>.
-	  3. Write custom_mfr_ser = <mfr_serial> on the renamed record.
-	  4. Update the global-search index row.
-	  5. Patch entry.serial_no = <internal_serial> and save the bundle.
+	Fires during the parent voucher's on_submit, after bundle entries are
+	populated but before Stock Ledger Entries are written.
 
-	Idempotent: if a Serial No with custom_mfr_ser = mfr_serial already
-	exists for this item the entry is updated to point to it and skipped.
+	Renames every OEM-named Serial No in the bundle to an internal serial,
+	stores the OEM name in custom_mfr_ser, and patches doc.entries in-place
+	so the upstream SLE writer sees the internal names.
 	"""
-	frappe.log_error(
-		f"_remap_bundle called: bundle={bundle_name} item={item_code}",
-		"MFR_DEBUG _remap_bundle",
-	)
-	bundle = frappe.get_doc("Serial and Batch Bundle", bundle_name)
-	changed = False
+	if doc.type_of_transaction != "Inward":
+		return
+	if doc.voucher_type not in INWARD_VOUCHERS:
+		return
+	if not frappe.get_cached_value("Item", doc.item_code, "custom_generate_internal_serial"):
+		return
 
-	for entry in bundle.entries:
+	for entry in doc.entries:
 		mfr_serial = entry.serial_no
 		if not mfr_serial:
 			continue
 
-		# Idempotency guard: already remapped in a previous attempt.
+		# Idempotency: already remapped in a previous attempt on this bundle.
 		already = frappe.db.get_value(
 			"Serial No",
-			{"custom_mfr_ser": mfr_serial, "item_code": item_code},
+			{"custom_mfr_ser": mfr_serial, "item_code": doc.item_code},
 			"name",
 		)
 		if already:
-			if entry.serial_no != already:
-				entry.serial_no = already
-				changed = True
+			_patch_entry(entry, already)
 			continue
 
-		# Uniqueness guard: catches concurrent submissions.
+		# Uniqueness guard for concurrent submissions.
 		conflict = frappe.db.get_value(
 			"Serial No",
-			{"custom_mfr_ser": mfr_serial, "item_code": item_code},
+			{"custom_mfr_ser": mfr_serial, "item_code": doc.item_code},
 			"name",
 		)
 		if conflict:
 			frappe.throw(
 				f"MFR Serial <b>{mfr_serial}</b> already exists for item "
-				f"<b>{item_code}</b> as internal serial <b>{conflict}</b>. "
+				f"<b>{doc.item_code}</b> as internal serial <b>{conflict}</b>. "
 				f"Each manufacturer serial must be unique per item."
 			)
 
-		internal_serial = _get_next_internal_serial(item_code)
+		internal_serial = _get_next_internal_serial(doc.item_code)
 
-		sn_exists = frappe.db.exists("Serial No", mfr_serial)
-		frappe.log_error(
-			f"_remap_bundle: mfr={mfr_serial} internal={internal_serial} sn_exists={sn_exists}",
-			"MFR_DEBUG rename_step",
-		)
-		if sn_exists:
+		if frappe.db.exists("Serial No", mfr_serial):
 			# Standard path: rename the OEM-named stub to the internal name.
 			rename_doc(
 				"Serial No",
@@ -136,84 +128,61 @@ def _remap_bundle(bundle_name, item_code):
 				rebuild_search=False,
 			)
 		else:
-			# Fallback: CSV/bulk-upload path — create fresh with internal name.
+			# Fallback: serial was never pre-created (amended PI, bulk import, etc.)
 			sn = frappe.new_doc("Serial No")
 			sn.serial_no = internal_serial
-			sn.item_code = item_code
+			sn.item_code = doc.item_code
 			sn.flags.ignore_permissions = True
-			try:
-				sn.insert(ignore_permissions=True)
-				frappe.log_error(f"_remap_bundle: inserted {internal_serial}", "MFR_DEBUG insert_ok")
-			except Exception as e:
-				frappe.log_error(f"_remap_bundle: insert FAILED {e}", "MFR_DEBUG insert_fail")
-				raise
+			sn.insert(ignore_permissions=True)
 
-		# Single source of truth for the manufacturer serial.
-		# db.set_value is intentional here — we do NOT want validate/save hooks
-		# to fire again at this point.
+		# Store OEM serial on the renamed/created record.
 		frappe.db.set_value("Serial No", internal_serial, "custom_mfr_ser", mfr_serial)
 
 		# Keep the full-text global search index in sync.
-		# frappe.db.set_value bypasses the document lifecycle, so there is no
-		# on_update event to trigger the index rebuild; we do it explicitly.
 		frappe.db.sql(
 			"""UPDATE `__global_search`
 			   SET content = %s
 			   WHERE doctype = 'Serial No' AND name = %s""",
-			(f"{internal_serial} {mfr_serial} {item_code}", internal_serial),
+			(f"{internal_serial} {mfr_serial} {doc.item_code}", internal_serial),
 		)
 
-		entry.serial_no = internal_serial
-		changed = True
-
-	if changed:
-		bundle.flags.ignore_validate = True
-		bundle.flags.ignore_permissions = True
-		bundle.save()
-
-	return changed
+		_patch_entry(entry, internal_serial)
 
 
-def _process_items(items):
-	"""Walk the items table and remap every applicable SABB."""
-	for item in items:
-		bundle = item.get("serial_and_batch_bundle")
-		has_sn = frappe.get_cached_value("Item", item.item_code, "has_serial_no")
-		gen_int = frappe.get_cached_value("Item", item.item_code, "custom_generate_internal_serial")
-		frappe.log_error(
-			f"_process_items: item={item.item_code} bundle={bundle} "
-			f"has_serial_no={has_sn} custom_generate_internal_serial={gen_int}",
-			"MFR_DEBUG _process_items",
+def _patch_entry(entry, internal_serial):
+	"""
+	Update the Serial and Batch Entry row both in-memory and in the DB.
+
+	In-memory change: ERPNext reads doc.entries when writing SLEs, so this
+	ensures the SLE is written with the internal serial name.
+
+	DB change: persists the rename for future lookups and the bundle view.
+	"""
+	entry.serial_no = internal_serial
+	if entry.name:
+		frappe.db.set_value(
+			"Serial and Batch Entry",
+			entry.name,
+			"serial_no",
+			internal_serial,
+			update_modified=False,
 		)
-		if not bundle:
-			continue
-		if not has_sn:
-			continue
-		if not gen_int:
-			continue
-		_remap_bundle(bundle, item.item_code)
 
 
-# ── event handlers ─────────────────────────────────────────────────────────────
+# -- Legacy voucher-level handlers (now no-ops) --------------------------------
+# SABB.before_submit handles all cases uniformly. These stubs prevent errors
+# if they are still referenced in hooks.py during any transition period.
 
 def remap_serials(doc, method):
-	"""Purchase Receipt — always has stock impact."""
-	_process_items(doc.items)
+	"""Purchase Receipt -- handled via SABB.before_submit."""
+	pass
 
 
 def remap_serials_pi(doc, method):
-	"""Purchase Invoice — only when 'Update Stock' is ticked."""
-	frappe.log_error(
-		f"remap_serials_pi fired: doc={doc.name} update_stock={doc.update_stock} items={len(doc.items)}",
-		"MFR_DEBUG remap_serials_pi",
-	)
-	if doc.update_stock:
-		_process_items(doc.items)
+	"""Purchase Invoice -- handled via SABB.before_submit."""
+	pass
 
 
 def remap_serials_se(doc, method):
-	"""Stock Entry — only for inward purposes."""
-	INWARD_PURPOSES = {"Material Receipt", "Manufacture", "Repack"}
-	if doc.purpose not in INWARD_PURPOSES:
-		return
-	_process_items(doc.items)
+	"""Stock Entry -- handled via SABB.before_submit."""
+	pass

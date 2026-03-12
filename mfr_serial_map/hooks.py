@@ -15,24 +15,20 @@ doctype_js = {
 }
 
 # ── doc_events ────────────────────────────────────────────────────────────────
-# Fires before the stock ledger is written — the only safe window to rename
-# Serial No documents before any SLE references them.
+# SABB.before_submit fires during the parent voucher's on_submit, after the
+# bundle entries are populated but before Stock Ledger Entries are written.
+# This is the only reliable window for renaming Serial No documents, because
+# for amended PIs (and in general) the SABB does not yet exist at
+# Purchase Invoice.before_submit time.
 doc_events = {
 	"Serial No": {
 		# Uniqueness of custom_mfr_ser per item_code — catches form edits,
 		# imports and any non-receipt code path.
 		"before_save": "mfr_serial_map.overrides.serial_no_validate.validate_mfr_ser_unique",
 	},
-	"Purchase Receipt": {
-		"before_submit": "mfr_serial_map.overrides.inward_before_submit.remap_serials",
-	},
-	"Purchase Invoice": {
-		# Only relevant when 'Update Stock' is ticked
-		"before_submit": "mfr_serial_map.overrides.inward_before_submit.remap_serials_pi",
-	},
-	"Stock Entry": {
-		# Only relevant for inward purposes (Material Receipt, Manufacture, Repack)
-		"before_submit": "mfr_serial_map.overrides.inward_before_submit.remap_serials_se",
+	"Serial and Batch Bundle": {
+		# Remap OEM serials → internal serials for all inward vouchers.
+		"before_submit": "mfr_serial_map.overrides.inward_before_submit.remap_serials_sabb",
 	},
 }
 
