@@ -19,7 +19,8 @@
     "label": "Generate Internal Serial No",
     "fieldname": "custom_generate_internal_serial",
     "fieldtype": "Check",
-    "insert_after": "serial_no_series",
+    "insert_after": "has_serial_no",
+    "depends_on": "has_serial_no",
     "description": "When enabled, the manufacturer serial scanned at receipt is stored in MFR Serial No and the item's Serial No Series generates the internal tracking number.",
     "translatable": 0
   }
