@@ -10,6 +10,10 @@ app_icon = "octicon octicon-tag"
 # Fixtures are synced on `bench migrate`
 fixtures = ["Custom Field", "Property Setter"]
 
+doctype_js = {
+	"Item": "public/js/item_form.js",
+}
+
 # ── doc_events ────────────────────────────────────────────────────────────────
 # Fires before the stock ledger is written — the only safe window to rename
 # Serial No documents before any SLE references them.

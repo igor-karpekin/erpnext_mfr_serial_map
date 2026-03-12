@@ -16,6 +16,16 @@ from frappe.model.rename_doc import rename_doc
 from erpnext.stock.doctype.serial_no.serial_no import get_new_serial_number
 
 
+@frappe.whitelist()
+def get_effective_series(item_code):
+	"""Return the series that will be used for internal serial generation.
+	Checks item-level series first, then site default. Returns None if neither defined."""
+	series = frappe.get_cached_value("Item", item_code, "serial_no_series")
+	if not series:
+		series = frappe.db.get_default("serial_no_series")
+	return series or None
+
+
 def _remap_bundle(bundle_name, item_code):
 	"""
 	For every entry in the SABB whose serial_no does not yet have a
@@ -32,13 +42,14 @@ def _remap_bundle(bundle_name, item_code):
 	no-op because step 3 leaves a non-empty custom_mfr_ser, which is the
 	guard checked at the top of the loop.
 	"""
-	series = frappe.get_cached_value("Item", item_code, "serial_no_series")
+	series = get_effective_series(item_code)
 	if not series:
 		frappe.throw(
 			f"Item {frappe.bold(item_code)} has <b>Generate Internal Serial No</b> enabled "
-			f"but no <b>Serial No Series</b> is defined on the item."
+			f"but no Serial No Series is defined — neither on the item nor as a site default. "
+			f"Set a series in <b>Serial Number Series</b> on the item, or configure a "
+			f"default via <b>Setup → Naming Series</b>."
 		)
-
 	bundle = frappe.get_doc("Serial and Batch Bundle", bundle_name)
 	changed = False
 
