@@ -8,13 +8,17 @@
 #   By the time SABB.before_submit fires (during PI.on_submit), the bundle
 #   entries hold the scanned OEM serials -- and no SLEs have been written yet.
 #
-# The hook modifies doc.entries in-place (used by ERPNext to write SLEs) and
-# also updates the DB rows via _patch_entry(), so both the in-flight
-# transaction and any future lookup see the internal serial names.
+# WHY we do NOT use rename_doc:
+#   rename_doc scans all doctypes for Link fields pointing to Serial No and
+#   issues UPDATE statements on each of them.  For a freshly-created stub
+#   (no SLEs, no transfers, no other references) every one of those UPDATEs
+#   is a no-op, but the metadata fetch alone costs ~2-3 s per serial.
+#   For a 20-serial receipt that adds ~60 s to submission time.
+#   Instead we do a single direct SQL UPDATE on tabSerial No and update the
+#   one legitimate reference (tabSerial and Batch Entry) ourselves.
 
 import frappe
 from frappe.model.naming import make_autoname
-from frappe.model.rename_doc import rename_doc
 
 INWARD_VOUCHERS = {"Purchase Receipt", "Purchase Invoice", "Stock Entry"}
 
@@ -37,13 +41,8 @@ def get_effective_series(item_code):
 	return None
 
 
-def _get_next_internal_serial(item_code):
-	"""
-	Determine the next internal serial name using, in order:
-	  1. Item.serial_no_series  (explicit per-item series)
-	  2. Document Naming Rule for Serial No  (global rule, e.g. CA-.YY..MM..DD.-.####)
-	Raises a descriptive error if neither is configured.
-	"""
+def _get_series(item_code):
+	"""Return the naming series string for this item (resolves once per bundle)."""
 	series = frappe.get_cached_value("Item", item_code, "serial_no_series")
 	if not series:
 		rules = frappe.get_all(
@@ -55,19 +54,44 @@ def _get_next_internal_serial(item_code):
 		)
 		if rules:
 			series = rules[0].prefix
-
 	if not series:
 		frappe.throw(
 			f"Item {frappe.bold(item_code)} has <b>Generate Internal Serial No</b> enabled "
 			f"but no series is defined. Set <b>Serial Number Series</b> on the item, or "
 			f"create a <b>Document Naming Rule</b> for Serial No in Setup."
 		)
+	return series
 
+
+def _next_serial(series):
+	"""Generate the next unique internal serial name from a series string."""
 	name = make_autoname(series, "Serial No")
-	# Guard against collisions (same logic as get_new_serial_number)
 	if frappe.db.exists("Serial No", name):
-		return _get_next_internal_serial(item_code)
+		return _next_serial(series)
 	return name
+
+
+def _fast_rename_serial(mfr_serial, internal_serial, item_code):
+	"""
+	Rename a freshly-created Serial No stub without using rename_doc.
+
+	At SABB.before_submit time the stub has no Stock Ledger Entries and no
+	other document links -- rename_doc's cross-doctype link scan is therefore
+	pure overhead (~2-3 s per serial).  A direct SQL UPDATE is safe here
+	and reduces the cost to a single DB round-trip.
+	"""
+	frappe.db.sql(
+		"UPDATE `tabSerial No` SET name = %s, serial_no = %s WHERE name = %s",
+		(internal_serial, internal_serial, mfr_serial),
+	)
+	frappe.clear_document_cache("Serial No", mfr_serial)
+	# Update global search: rename the existing row (if present).
+	frappe.db.sql(
+		"""UPDATE `__global_search`
+		   SET name = %s, content = %s
+		   WHERE doctype = 'Serial No' AND name = %s""",
+		(internal_serial, f"{internal_serial} {mfr_serial} {item_code}", mfr_serial),
+	)
 
 
 def remap_serials_sabb(doc, method):
@@ -88,12 +112,28 @@ def remap_serials_sabb(doc, method):
 	if not frappe.get_cached_value("Item", doc.item_code, "custom_generate_internal_serial"):
 		return
 
+	# Resolve the series once — only needed for the fallback rename path.
+	series = _get_series(doc.item_code)
+
+	# Track MFR serials seen in this bundle to catch intra-bundle duplicates
+	# before the idempotency DB check would silently merge them.
+	seen_in_bundle = set()
+
 	for entry in doc.entries:
 		mfr_serial = entry.serial_no
 		if not mfr_serial:
 			continue
 
-		# Idempotency: already remapped in a previous attempt on this bundle.
+		if mfr_serial in seen_in_bundle:
+			frappe.throw(
+				f"MFR Serial <b>{mfr_serial}</b> appears more than once in this bundle for item "
+				f"<b>{doc.item_code}</b>. Each manufacturer serial must be unique."
+			)
+		seen_in_bundle.add(mfr_serial)
+
+		# Primary path: stub was already created with the internal name at scan time
+		# (serial_batch.py stored mfr_serial in custom_mfr_ser).
+		# Just update the bundle entry to point to the internal serial.
 		already = frappe.db.get_value(
 			"Serial No",
 			{"custom_mfr_ser": mfr_serial, "item_code": doc.item_code},
@@ -103,7 +143,15 @@ def remap_serials_sabb(doc, method):
 			_patch_entry(entry, already)
 			continue
 
-		# Uniqueness guard for concurrent submissions.
+		# Skip entries that are already an internal serial (e.g. serial_batch.py
+		# substituted the internal name for a re-receipt — entry.serial_no is
+		# already correct, custom_mfr_ser already set on the Serial No doc).
+		existing_mfr = frappe.db.get_value("Serial No", mfr_serial, "custom_mfr_ser")
+		if existing_mfr:
+			continue
+
+		# Fallback: pre-existing OEM-named stub (from a cancelled PI or records
+		# created before this app was deployed).  Rename it to an internal serial.
 		conflict = frappe.db.get_value(
 			"Serial No",
 			{"custom_mfr_ser": mfr_serial, "item_code": doc.item_code},
@@ -116,37 +164,23 @@ def remap_serials_sabb(doc, method):
 				f"Each manufacturer serial must be unique per item."
 			)
 
-		internal_serial = _get_next_internal_serial(doc.item_code)
+		internal_serial = _next_serial(series)
 
 		if frappe.db.exists("Serial No", mfr_serial):
-			# Standard path: rename the OEM-named stub to the internal name.
-			rename_doc(
-				"Serial No",
-				mfr_serial,
-				internal_serial,
-				ignore_permissions=True,
-				rebuild_search=False,
-				show_alert=False,
-			)
+			_fast_rename_serial(mfr_serial, internal_serial, doc.item_code)
 		else:
-			# Fallback: serial was never pre-created (amended PI, bulk import, etc.)
-			sn = frappe.new_doc("Serial No")
-			sn.serial_no = internal_serial
-			sn.item_code = doc.item_code
-			sn.flags.ignore_permissions = True
-			sn.insert(ignore_permissions=True)
+			frappe.db.sql(
+				"""INSERT INTO `tabSerial No`
+				   (name, serial_no, item_code, docstatus, creation, modified, owner, modified_by)
+				   VALUES (%s, %s, %s, 0, NOW(), NOW(), %s, %s)""",
+				(internal_serial, internal_serial, doc.item_code,
+				 frappe.session.user, frappe.session.user),
+			)
 
-		# Store OEM serial on the renamed/created record.
-		frappe.db.set_value("Serial No", internal_serial, "custom_mfr_ser", mfr_serial)
-
-		# Keep the full-text global search index in sync.
-		frappe.db.sql(
-			"""UPDATE `__global_search`
-			   SET content = %s
-			   WHERE doctype = 'Serial No' AND name = %s""",
-			(f"{internal_serial} {mfr_serial} {doc.item_code}", internal_serial),
+		frappe.db.set_value(
+			"Serial No", internal_serial, "custom_mfr_ser", mfr_serial,
+			update_modified=False,
 		)
-
 		_patch_entry(entry, internal_serial)
 
 
