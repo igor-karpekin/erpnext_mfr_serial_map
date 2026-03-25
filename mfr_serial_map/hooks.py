@@ -44,6 +44,10 @@ override_whitelisted_methods = {
 	# Serial & Batch Bundle dialog manual entry (textarea / range / CSV upload)
 	"erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle.create_serial_nos":
 		"mfr_serial_map.overrides.serial_batch.create_serial_nos",
+	# Translates OEM serial values → internal names in entries before SABB is
+	# saved, so Frappe's Link field validation passes.
+	"erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle.add_serial_batch_ledgers":
+		"mfr_serial_map.overrides.serial_batch.add_serial_batch_ledgers",
 }
 
 # ── standard_queries ───────────────────────────────────────────────────────────

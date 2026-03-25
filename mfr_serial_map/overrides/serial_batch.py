@@ -21,7 +21,9 @@
 #   c) Non-opted-in item, outward, batch, etc. → fall through to _original.
 
 import frappe
+from frappe.utils import parse_json
 from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import (
+	add_serial_batch_ledgers as _original_add_serial_batch_ledgers,
 	create_serial_nos as _original_create_serial_nos,
 	is_serial_batch_no_exists as _original,
 )
@@ -43,6 +45,48 @@ def _create_serial_stub(oem_serial, item_code):
 		(internal_serial, internal_serial, item_code, oem_serial,
 		 frappe.session.user, frappe.session.user),
 	)
+
+
+@frappe.whitelist()
+def add_serial_batch_ledgers(entries, child_row, doc, warehouse, do_not_save=False):
+	"""
+	Translate OEM serial values in entries to internal serial names before the
+	SABB is saved.  This is necessary because:
+	  - The browser always stores the raw scanned / typed OEM value in the entry.
+	  - SABB.serial_no is a Link field; Frappe validates it on save.
+	  - Our scan/manual hooks created the stub with the internal name, so the
+	    OEM value would fail link validation without this translation.
+	"""
+	if isinstance(child_row, str):
+		child_row_dict = frappe._dict(parse_json(child_row))
+	else:
+		child_row_dict = frappe._dict(child_row)
+
+	item_code = child_row_dict.get("item_code")
+
+	if item_code and frappe.get_cached_value("Item", item_code, "custom_generate_internal_serial"):
+		if isinstance(entries, str):
+			entries_list = parse_json(entries)
+		else:
+			entries_list = list(entries)
+
+		translated = []
+		for row in entries_list:
+			row = dict(frappe._dict(row))
+			oem = row.get("serial_no")
+			if oem and not frappe.db.exists("Serial No", oem):
+				# OEM value — find the internal serial created at scan time.
+				internal = frappe.db.get_value(
+					"Serial No",
+					{"custom_mfr_ser": oem, "item_code": item_code},
+					"name",
+				)
+				if internal:
+					row["serial_no"] = internal
+			translated.append(row)
+		entries = translated
+
+	return _original_add_serial_batch_ledgers(entries, child_row, doc, warehouse, do_not_save=do_not_save)
 
 
 @frappe.whitelist()
