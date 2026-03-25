@@ -1,27 +1,28 @@
 # mfr_serial_map/overrides/serial_batch.py
 #
-# Overrides is_serial_batch_no_exists via override_whitelisted_methods.
+# Overrides two whitelisted APIs via override_whitelisted_methods:
 #
-# Called by the Serial & Batch Bundle dialog scan field on every barcode scan
-# BEFORE the bundle entry row is added.
+#  1. is_serial_batch_no_exists  — called per scan in the SABB dialog scan field.
+#  2. create_serial_nos          — called when the user enters serials manually
+#                                  (textarea / serial-range / CSV upload) and
+#                                  clicks "Add Serial Nos".
 #
-# For opted-in items we create the Serial No stub here with the correct
-# internal name (CA-YYMMDD-####) immediately, storing the scanned OEM value
-# in custom_mfr_ser.  This means:
+# Both entry points use the same strategy for opted-in items:
 #
-#   - No "document created" toast (we bypass frappe.new_doc().save()).
-#   - No rename at submit time (stub already has the right name).
-#   - SABB.before_submit only needs to patch the bundle entry from the scanned
-#     OEM value to the internal serial (a cheap single-row UPDATE).
+#   - Create the Serial No stub immediately with the correct internal name via
+#     raw SQL INSERT (no Frappe document layer, no hooks, no toast).
+#   - Store the scanned / typed OEM value in custom_mfr_ser.
+#   - Leave the bundle entry's serial_no as the OEM value (the JS controls
+#     that field); SABB.before_submit patches the entry to the internal serial.
 #
 # Cases:
-#   a) Brand-new OEM serial → create stub internally (internal name, mfr_ser stored).
-#   b) OEM serial already mapped from a prior receipt → look up the existing
-#      internal serial; no new stub needed.
+#   a) Brand-new OEM serial → _create_serial_stub (internal name, mfr_ser stored).
+#   b) OEM serial already mapped from a prior receipt → no new stub needed.
 #   c) Non-opted-in item, outward, batch, etc. → fall through to _original.
 
 import frappe
 from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import (
+	create_serial_nos as _original_create_serial_nos,
 	is_serial_batch_no_exists as _original,
 )
 from mfr_serial_map.overrides.inward_before_submit import _get_series, _next_serial
@@ -42,6 +43,38 @@ def _create_serial_stub(oem_serial, item_code):
 		(internal_serial, internal_serial, item_code, oem_serial,
 		 frappe.session.user, frappe.session.user),
 	)
+
+
+@frappe.whitelist()
+def create_serial_nos(item_code, serial_nos):
+	"""
+	Called when the user enters serials manually (textarea, range, or CSV).
+
+	For opted-in items: create Serial No stubs with internal names via
+	_create_serial_stub instead of letting ERPNext's make_serial_nos create
+	them with OEM names.
+
+	The returned list still uses the OEM serial as the 'serial_no' key so the
+	dialog entries table (and ultimately the SABB) store the OEM value.
+	SABB.before_submit then patches the entries to the internal serial.
+	"""
+	if not frappe.get_cached_value("Item", item_code, "custom_generate_internal_serial"):
+		return _original_create_serial_nos(item_code, serial_nos)
+
+	if isinstance(serial_nos, str):
+		oem_serials = [s.strip() for s in serial_nos.splitlines() if s.strip()]
+	else:
+		oem_serials = [s.strip() for s in serial_nos if s.strip()]
+
+	entries = []
+	for oem_serial in oem_serials:
+		# Skip if already mapped (re-receipt of a known OEM serial)
+		already = frappe.db.get_value("Serial No", {"custom_mfr_ser": oem_serial}, "name")
+		if not already and not frappe.db.exists("Serial No", oem_serial):
+			_create_serial_stub(oem_serial, item_code)
+		entries.append({"serial_no": oem_serial, "qty": 1})
+
+	return entries
 
 
 @frappe.whitelist()

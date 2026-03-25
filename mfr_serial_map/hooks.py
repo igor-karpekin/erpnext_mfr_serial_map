@@ -38,9 +38,12 @@ override_whitelisted_methods = {
 	# Form-level scan field (scan_barcode on the document header)
 	"erpnext.stock.utils.scan_barcode":
 		"mfr_serial_map.overrides.scan_barcode.scan_barcode",
-	# Serial & Batch Bundle dialog scan field
+	# Serial & Batch Bundle dialog scan field (one-by-one scan)
 	"erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle.is_serial_batch_no_exists":
 		"mfr_serial_map.overrides.serial_batch.is_serial_batch_no_exists",
+	# Serial & Batch Bundle dialog manual entry (textarea / range / CSV upload)
+	"erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle.create_serial_nos":
+		"mfr_serial_map.overrides.serial_batch.create_serial_nos",
 }
 
 # ── standard_queries ───────────────────────────────────────────────────────────
