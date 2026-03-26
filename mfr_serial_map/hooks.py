@@ -14,6 +14,10 @@ doctype_js = {
 	"Item": "public/js/item_form.js",
 }
 
+# Loaded on every page — fixes the ERPNext dialog_set flag bug so the serial
+# selector dialog opens reliably for every item added to a transaction.
+app_include_js = ["/assets/mfr_serial_map/js/serial_dialog_fix.js"]
+
 # ── doc_events ────────────────────────────────────────────────────────────────
 # SABB.before_submit fires during the parent voucher's on_submit, after the
 # bundle entries are populated but before Stock Ledger Entries are written.
