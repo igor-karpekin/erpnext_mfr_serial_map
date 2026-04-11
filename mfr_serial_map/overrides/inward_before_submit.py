@@ -262,19 +262,32 @@ def translate_serial_nos_in_se(doc, method):
 		translated = []
 		changed = False
 		for oem in oem_serials:
-			if frappe.db.exists("Serial No", oem):
-				# Serial No exists — but normalize case (MariaDB is case-insensitive,
-				# so "J6WDA1003288" matches "j6wda1003288"; we want the exact DB name).
+			existing_item = frappe.db.get_value("Serial No", oem, "item_code")
+			if existing_item == row.item_code:
+				# Already a correct internal name for this item — normalize case only.
 				canonical = frappe.db.get_value("Serial No", oem, "name") or oem
 				if canonical != oem:
 					changed = True
 				translated.append(canonical)
 			else:
+				# Either doesn't exist (existing_item is None) or belongs to a
+				# different item (cross-item OEM barcode reuse, e.g. chassis serial
+				# used as identifier for both component TWR and finished DSK).
+				# Treat as OEM barcode for the current item.
 				internal = frappe.db.get_value(
 					"Serial No",
 					{"custom_mfr_ser": oem, "item_code": row.item_code},
 					"name",
 				)
+				if not internal:
+					# No stub yet — create one now (same as scan path).
+					from mfr_serial_map.overrides.serial_batch import _create_serial_stub
+					_create_serial_stub(oem, row.item_code)
+					internal = frappe.db.get_value(
+						"Serial No",
+						{"custom_mfr_ser": oem, "item_code": row.item_code},
+						"name",
+					)
 				if internal:
 					translated.append(internal)
 					changed = True
