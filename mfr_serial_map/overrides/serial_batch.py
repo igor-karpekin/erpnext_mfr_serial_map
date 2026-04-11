@@ -81,15 +81,19 @@ def add_serial_batch_ledgers(entries, child_row, doc, warehouse, do_not_save=Fal
 		for row in entries_list:
 			row = dict(frappe._dict(row))
 			oem = row.get("serial_no")
-			if oem and not frappe.db.exists("Serial No", oem):
-				# OEM value — find the internal serial created at scan time.
-				internal = frappe.db.get_value(
-					"Serial No",
-					{"custom_mfr_ser": oem, "item_code": item_code},
-					"name",
-				)
-				if internal:
-					row["serial_no"] = internal
+			if oem:
+				existing_item = frappe.db.get_value("Serial No", oem, "item_code")
+				# Translate if serial doesn't exist at all, OR exists but for a
+				# different item (cross-item OEM barcode reuse, e.g. TWR chassis
+				# serial reused as identifier for finished DSK good).
+				if existing_item != item_code:
+					internal = frappe.db.get_value(
+						"Serial No",
+						{"custom_mfr_ser": oem, "item_code": item_code},
+						"name",
+					)
+					if internal:
+						row["serial_no"] = internal
 			translated.append(row)
 		entries = translated
 
