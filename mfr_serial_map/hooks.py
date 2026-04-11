@@ -41,6 +41,14 @@ doc_events = {
 		# Without this, ERPNext auto-creates a SABB with OEM values which fails
 		# Frappe's Link field validation for Serial and Batch Entry.serial_no.
 		"validate": "mfr_serial_map.overrides.inward_before_submit.translate_serial_nos_in_se",
+		# Backfill serial_no into SLEs from SABB bundles so Stock Ledger shows serials.
+		"on_submit": "mfr_serial_map.overrides.inward_before_submit.backfill_sle_serial_no",
+	},
+	"Purchase Invoice": {
+		"on_submit": "mfr_serial_map.overrides.inward_before_submit.backfill_sle_serial_no",
+	},
+	"Purchase Receipt": {
+		"on_submit": "mfr_serial_map.overrides.inward_before_submit.backfill_sle_serial_no",
 	},
 }
 

@@ -333,3 +333,43 @@ def remap_serials_pi(doc, method):
 def remap_serials_se(doc, method):
 	"""Stock Entry -- handled via SABB.before_submit."""
 	pass
+
+
+def backfill_sle_serial_no(doc, method):
+	"""on_submit: copy serial_no from SABB bundle entries into the SLE serial_no field.
+
+	When serials are entered via the SABB dialog (use_serial_batch_fields=0),
+	ERPNext writes serial_no=NULL on the SLE and stores serials only in the bundle.
+	This makes the Stock Ledger report show a blank Serial No column.
+
+	Backfill immediately after submission for any SLE belonging to this voucher
+	that has a bundle but no serial_no, limited to items with custom_generate_internal_serial=1.
+	"""
+	voucher_no = doc.name
+	voucher_type = doc.doctype
+
+	rows = frappe.db.sql(
+		"""
+		SELECT sle.name AS sle_name,
+		       GROUP_CONCAT(sabe.serial_no ORDER BY sabe.creation SEPARATOR %s) AS serials
+		FROM `tabStock Ledger Entry` sle
+		JOIN `tabSerial and Batch Entry` sabe ON sabe.parent = sle.serial_and_batch_bundle
+		JOIN `tabItem` i ON i.name = sle.item_code
+		WHERE sle.voucher_no = %s
+		  AND sle.voucher_type = %s
+		  AND sle.docstatus = 1
+		  AND sle.serial_no IS NULL
+		  AND sle.serial_and_batch_bundle IS NOT NULL
+		  AND sabe.serial_no IS NOT NULL
+		  AND sabe.serial_no != ''
+		  AND i.custom_generate_internal_serial = 1
+		GROUP BY sle.name
+		""",
+		("\n", voucher_no, voucher_type),
+		as_dict=True,
+	)
+
+	for row in rows:
+		frappe.db.set_value(
+			"Stock Ledger Entry", row.sle_name, "serial_no", row.serials, update_modified=False
+		)
