@@ -15,10 +15,17 @@
 #   - Leave the bundle entry's serial_no as the OEM value (the JS controls
 #     that field); SABB.before_submit patches the entry to the internal serial.
 #
-# Cases:
+# Cases (Inward):
 #   a) Brand-new OEM serial → _create_serial_stub (internal name, mfr_ser stored).
 #   b) OEM serial already mapped from a prior receipt → no new stub needed.
-#   c) Non-opted-in item, outward, batch, etc. → fall through to _original.
+#
+# Cases (Outward — e.g. manufacturing consumption):
+#   c) OEM barcode scanned → find internal serial via custom_mfr_ser → skip throw.
+#      add_serial_batch_ledgers translates OEM → internal before saving.
+#   d) OEM barcode not found in mapping → fall through to _original (raises error).
+#
+# Cases (non-opted-in item, batch, etc.):
+#   e) → fall through to _original.
 
 import frappe
 from frappe.utils import parse_json
@@ -123,20 +130,27 @@ def create_serial_nos(item_code, serial_nos):
 
 @frappe.whitelist()
 def is_serial_batch_no_exists(item_code, type_of_transaction, serial_no=None, batch_no=None):
-	if (
-		serial_no
-		and type_of_transaction == "Inward"
-		and frappe.get_cached_value("Item", item_code, "custom_generate_internal_serial")
-		and not frappe.db.exists("Serial No", serial_no)
-	):
-		# Check whether this OEM serial was already received and remapped.
-		already_mapped = frappe.db.get_value(
-			"Serial No", {"custom_mfr_ser": serial_no}, "name"
-		)
-		if not already_mapped:
-			# Brand-new OEM serial — create the stub with the internal name now.
-			_create_serial_stub(serial_no, item_code)
-		# Either way, the Serial No is handled — skip _original entirely.
-		return
+	if serial_no and frappe.get_cached_value("Item", item_code, "custom_generate_internal_serial"):
+		serial_exists = frappe.db.exists("Serial No", serial_no)
+
+		if not serial_exists:
+			# Check if this OEM serial value maps to an internal serial.
+			already_mapped = frappe.db.get_value(
+				"Serial No", {"custom_mfr_ser": serial_no, "item_code": item_code}, "name"
+			)
+
+			if type_of_transaction == "Inward":
+				if not already_mapped:
+					# Brand-new OEM serial on receipt — create stub with internal name.
+					_create_serial_stub(serial_no, item_code)
+				# Stub created or already mapped — skip _original entirely.
+				return
+
+			if type_of_transaction == "Outward":
+				if already_mapped:
+					# Known OEM barcode scanned for consumption (e.g. manufacturing).
+					# add_serial_batch_ledgers will translate OEM → internal before saving.
+					return
+				# No mapping found — fall through to original to throw the proper error.
 
 	return _original(item_code, type_of_transaction, serial_no=serial_no, batch_no=batch_no)
