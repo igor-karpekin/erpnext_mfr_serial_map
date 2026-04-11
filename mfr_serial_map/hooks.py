@@ -32,7 +32,15 @@ doc_events = {
 	},
 	"Serial and Batch Bundle": {
 		# Remap OEM serials → internal serials for all inward vouchers.
+		# Also translates OEM values in Outward bundle entries (safety net).
 		"before_submit": "mfr_serial_map.overrides.inward_before_submit.remap_serials_sabb",
+	},
+	"Stock Entry": {
+		# Translate OEM serial values in the `serial_no` text field of Stock
+		# Entry Detail rows (auto-populated by Work Orders / manufacturing).
+		# Without this, ERPNext auto-creates a SABB with OEM values which fails
+		# Frappe's Link field validation for Serial and Batch Entry.serial_no.
+		"validate": "mfr_serial_map.overrides.inward_before_submit.translate_serial_nos_in_se",
 	},
 }
 

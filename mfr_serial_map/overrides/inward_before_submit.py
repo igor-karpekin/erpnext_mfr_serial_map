@@ -101,15 +101,22 @@ def remap_serials_sabb(doc, method):
 	Fires during the parent voucher's on_submit, after bundle entries are
 	populated but before Stock Ledger Entries are written.
 
-	Renames every OEM-named Serial No in the bundle to an internal serial,
-	stores the OEM name in custom_mfr_ser, and patches doc.entries in-place
-	so the upstream SLE writer sees the internal names.
+	Inward: renames every OEM-named Serial No to an internal serial, stores
+	the OEM name in custom_mfr_ser, patches entries in-place.
+
+	Outward: translates any OEM barcode values remaining in entries to the
+	matching internal serial name (safety net for all transfer/consumption paths).
 	"""
+	if not frappe.get_cached_value("Item", doc.item_code, "custom_generate_internal_serial"):
+		return
+
+	if doc.type_of_transaction == "Outward":
+		_translate_outward_entries(doc)
+		return
+
 	if doc.type_of_transaction != "Inward":
 		return
 	if doc.voucher_type not in INWARD_VOUCHERS:
-		return
-	if not frappe.get_cached_value("Item", doc.item_code, "custom_generate_internal_serial"):
 		return
 
 	# Resolve the series once — only needed for the fallback rename path.
@@ -184,6 +191,35 @@ def remap_serials_sabb(doc, method):
 		_patch_entry(entry, internal_serial)
 
 
+def _translate_outward_entries(doc):
+	"""
+	For Outward bundles: if any entry's serial_no is an OEM barcode value
+	(not a valid Serial No name, but has a custom_mfr_ser → internal mapping),
+	translate it to the internal name before SLEs are written.
+
+	This is a safety net for all outward paths (Material Transfer, manufacturing
+	consumption, Delivery Note, etc.) in case add_serial_batch_ledgers did not
+	fully translate the entries.
+	"""
+	for entry in doc.entries:
+		oem_value = entry.serial_no
+		if not oem_value:
+			continue
+		# Already a valid internal serial name → nothing to do.
+		if frappe.db.exists("Serial No", oem_value):
+			continue
+		# Look up internal serial by OEM mapping.
+		internal = frappe.db.get_value(
+			"Serial No",
+			{"custom_mfr_ser": oem_value, "item_code": doc.item_code},
+			"name",
+		)
+		if internal:
+			_patch_entry(entry, internal)
+		# If no mapping is found, leave as-is — the link validator will report
+		# the real error (unknown serial) rather than masking it.
+
+
 def _patch_entry(entry, internal_serial):
 	"""
 	Update the Serial and Batch Entry row both in-memory and in the DB.
@@ -202,6 +238,48 @@ def _patch_entry(entry, internal_serial):
 			internal_serial,
 			update_modified=False,
 		)
+
+
+def translate_serial_nos_in_se(doc, method):
+	"""
+	Stock Entry -- validate.
+
+	Translates OEM values in the `serial_no` text field of every Stock Entry
+	Detail row for opted-in items.  This field is auto-populated by Work Orders
+	and manufacturing flows with whatever serial names are in `tabSerial No`.  If
+	the user scanned OEM barcodes via the SABB dialog those serials were renamed
+	to internal names (CA-XXXXXX), so the text field should hold internal names.
+	But if it was populated before our app ran (or via a path that bypasses our
+	overrides), it may still hold OEM values which fail Frappe Link validation.
+	"""
+	for row in doc.get("items") or []:
+		if not row.serial_no:
+			continue
+		if not frappe.get_cached_value("Item", row.item_code, "custom_generate_internal_serial"):
+			continue
+
+		oem_serials = [s.strip() for s in row.serial_no.strip().splitlines() if s.strip()]
+		translated = []
+		changed = False
+		for oem in oem_serials:
+			if frappe.db.exists("Serial No", oem):
+				# Already an internal name.
+				translated.append(oem)
+			else:
+				internal = frappe.db.get_value(
+					"Serial No",
+					{"custom_mfr_ser": oem, "item_code": row.item_code},
+					"name",
+				)
+				if internal:
+					translated.append(internal)
+					changed = True
+				else:
+					# Unknown value — keep as-is; let ERPNext report the real error.
+					translated.append(oem)
+
+		if changed:
+			row.serial_no = "\n".join(translated)
 
 
 # -- Legacy voucher-level handlers (now no-ops) --------------------------------
