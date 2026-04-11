@@ -131,10 +131,14 @@ def create_serial_nos(item_code, serial_nos):
 @frappe.whitelist()
 def is_serial_batch_no_exists(item_code, type_of_transaction, serial_no=None, batch_no=None):
 	if serial_no and frappe.get_cached_value("Item", item_code, "custom_generate_internal_serial"):
-		serial_exists = frappe.db.exists("Serial No", serial_no)
+		existing_item = frappe.db.get_value("Serial No", serial_no, "item_code")
+		# serial_exists is True only if it exists AND belongs to the same item.
+		serial_exists = existing_item == item_code
 
 		if not serial_exists:
-			# Check if this OEM serial value maps to an internal serial.
+			# Either doesn't exist at all, or exists but for a different item (cross-item
+			# OEM barcode reuse, e.g. same chassis serial used for both TWR component and
+			# DSK finished good). Treat as OEM barcode for the current item.
 			already_mapped = frappe.db.get_value(
 				"Serial No", {"custom_mfr_ser": serial_no, "item_code": item_code}, "name"
 			)

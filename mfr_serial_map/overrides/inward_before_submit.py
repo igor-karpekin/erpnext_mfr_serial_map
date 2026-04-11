@@ -263,8 +263,12 @@ def translate_serial_nos_in_se(doc, method):
 		changed = False
 		for oem in oem_serials:
 			if frappe.db.exists("Serial No", oem):
-				# Already an internal name.
-				translated.append(oem)
+				# Serial No exists — but normalize case (MariaDB is case-insensitive,
+				# so "J6WDA1003288" matches "j6wda1003288"; we want the exact DB name).
+				canonical = frappe.db.get_value("Serial No", oem, "name") or oem
+				if canonical != oem:
+					changed = True
+				translated.append(canonical)
 			else:
 				internal = frappe.db.get_value(
 					"Serial No",
