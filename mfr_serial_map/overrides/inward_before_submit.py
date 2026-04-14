@@ -242,7 +242,7 @@ def _patch_entry(entry, internal_serial):
 
 def translate_serial_nos_in_se(doc, method):
 	"""
-	Stock Entry -- validate.
+	Stock Entry -- before_validate.
 
 	Translates OEM values in the `serial_no` text field of every Stock Entry
 	Detail row for opted-in items.  This field is auto-populated by Work Orders
@@ -252,14 +252,10 @@ def translate_serial_nos_in_se(doc, method):
 	But if it was populated before our app ran (or via a path that bypasses our
 	overrides), it may still hold OEM values which fail Frappe Link validation.
 
-	After translation, outgoing rows whose serial_no changed are re-rated via
-	set_rate_for_outgoing_items().  This is necessary because ERPNext's own
-	calculate_rate_and_amount() runs before this hook fires, so any OEM barcodes
-	in serial_no at that point yield rate=0 (no SABB history under the OEM name).
-	Once serial_no holds the internal CA-XXXXXX names the rate lookup succeeds.
+	Running before_validate means ERPNext's calculate_rate_and_amount() already
+	sees the internal CA-XXXXXX names, so valuation rates resolve correctly and
+	no false-positive zero-rate warnings are shown on first save.
 	"""
-	any_outgoing_row_changed = False
-
 	for row in doc.get("items") or []:
 		if not row.serial_no:
 			continue
@@ -305,15 +301,6 @@ def translate_serial_nos_in_se(doc, method):
 
 		if changed:
 			row.serial_no = "\n".join(translated)
-			if row.s_warehouse:
-				any_outgoing_row_changed = True
-
-	# Recompute outgoing rates if any serial_no was translated.
-	# ERPNext's calculate_rate_and_amount() ran before this hook with the
-	# original (OEM) serial values, which have no SABB history → rate=0.
-	# Now that serial_no holds internal CA-XXXXXX names, the lookup succeeds.
-	if any_outgoing_row_changed:
-		doc.set_rate_for_outgoing_items()
 
 
 # -- Legacy voucher-level handlers (now no-ops) --------------------------------
